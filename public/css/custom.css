@@ -1,0 +1,7 @@
+#page-container.sidebar-dark #sidebar {
+    background-color: #152039 !important;
+}
+
+#page-container.sidebar-dark #sidebar > .content-header {
+    background-color: #152039 !important;
+}
