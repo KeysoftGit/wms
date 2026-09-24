@@ -82,6 +82,8 @@ Route::middleware(['custom_auth', 'check_login'])->group(function () {
     Route::post('/password/update', [PasswordController::class, 'update'])->name('password.update');
     Route::get('/helper/available-stock-details', [HelperController::class, 'getAvailableStockDetails'])
         ->name('helper.available_stock_details');
+    Route::get('/helper/fifo-allocation', [HelperController::class, 'getFifoAllocation'])
+        ->name('helper.fifo_allocation');
 
     ///////////////////////////////
     //MISC                      //

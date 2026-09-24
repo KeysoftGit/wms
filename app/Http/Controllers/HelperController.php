@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Helpers\BukuStockHelper;
 use App\Helpers\CoilNoHelper;
 use App\Models\BukuStock;
 use App\Models\MsWarehouse;
@@ -11,6 +12,58 @@ use Illuminate\Support\Facades\Validator;
 
 class HelperController extends Controller
 {
+    public function getFifoAllocation(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'part_id'      => 'required|string',
+            'warehouse_id' => 'required|string',
+            'qty'          => 'required|numeric|gt:0',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Validation Error',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        try {
+            $allocations = BukuStockHelper::allocateFifo(
+                $request->input('part_id'),
+                $request->input('warehouse_id'),
+                (float) $request->input('qty')
+            );
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+
+        $coilNoByPartBatch = CoilNoHelper::lookupByPartBatch(collect($allocations)->map(fn ($row) => [
+            'PartID' => $request->input('part_id'),
+            'BatchNo' => $row['BatchNo'],
+        ]));
+
+        $allocations = array_map(function ($row) use ($request, $coilNoByPartBatch) {
+            $row['CoilNo'] = $coilNoByPartBatch->get(CoilNoHelper::key($request->input('part_id'), $row['BatchNo']))
+                ?? $coilNoByPartBatch->get(CoilNoHelper::batchKey($row['BatchNo']));
+
+            return $row;
+        }, $allocations);
+
+        return response()->json([
+            'status' => 'success',
+            'data' => [
+                'part_id' => $request->input('part_id'),
+                'warehouse_id' => $request->input('warehouse_id'),
+                'qty' => (float) $request->input('qty'),
+                'allocations' => $allocations,
+            ],
+        ]);
+    }
+
     public function getAvailableStockDetails(Request $request)
     {
         $validator = Validator::make($request->all(), [

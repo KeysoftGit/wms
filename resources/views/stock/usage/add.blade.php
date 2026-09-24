@@ -186,13 +186,26 @@
                             <label class="form-label">Warehouse</label>
                             <select id="modal-warehouse" class="form-select modal-stock-field"></select>
                         </div>
-                        <div class="col-lg-3 col-12 mb-3">
+                        <div class="col-lg-3 col-12 mb-3" v-if="modalDetail.editIndex === null">
+                            <label class="form-label">&nbsp;</label>
+                            <div class="form-check pt-2">
+                                <input class="form-check-input" type="checkbox" id="modal-fifo-auto"
+                                    v-model="modalDetail.FifoAuto" @change="onToggleFifoAuto">
+                                <label class="form-check-label" for="modal-fifo-auto">Auto Allocate (FIFO)</label>
+                            </div>
+                        </div>
+                        <div class="col-lg-3 col-12 mb-3" v-if="!modalDetail.FifoAuto">
                             <label class="form-label">Batch No</label>
                             <div class="input-group">
                                 <select id="modal-batch-no" class="form-select modal-stock-field"></select>
                                 <button type="button" class="btn btn-alt-secondary" @click="clearStockAttribute('BatchNo')" title="Clear Batch No"><i class="fa fa-times"></i></button>
                             </div>
-                        </div>                        <div class="col-lg-3 col-12 mb-3">
+                        </div>
+                        <div class="col-lg-3 col-12 mb-3" v-if="modalDetail.FifoAuto">
+                            <label class="form-label">Batch No</label>
+                            <input type="text" class="form-control" value="Auto (oldest stock first)" readonly>
+                        </div>
+                        <div class="col-lg-3 col-12 mb-3">
                             <label class="form-label">Stock</label>
                             <input type="text" class="form-control" :value="displayStockQty(modalDetail)" readonly>
                         </div>
@@ -200,15 +213,15 @@
                             <label class="form-label">Conversion</label>
                             <input type="text" class="form-control" :value="displayConversion(modalDetail)" readonly>
                         </div>
-                        <div class="col-lg-3 col-12 mb-3">
+                        <div class="col-lg-3 col-12 mb-3" v-if="!modalDetail.FifoAuto">
                             <label class="form-label">Coil No</label>
                             <input type="text" class="form-control" :value="displayDash(modalDetail.CoilNo)" readonly>
                         </div>
                         <div class="col-lg-3 col-12 mb-3">
                             <label class="form-label">Unit</label>
-                            <select class="form-select" v-model="modalDetail.InputUnit">
+                            <select class="form-select" v-model="modalDetail.InputUnit" :disabled="modalDetail.FifoAuto">
                                 <option :value="modalDetail.UnitID" v-if="modalDetail.UnitID">@{{ modalDetail.UnitID }}</option>
-                                <option :value="modalDetail.UnitID2" v-if="modalDetail.UnitID2">@{{ modalDetail.UnitID2 }}</option>
+                                <option :value="modalDetail.UnitID2" v-if="modalDetail.UnitID2 && !modalDetail.FifoAuto">@{{ modalDetail.UnitID2 }}</option>
                             </select>
                         </div>
                         <div class="col-lg-3 col-12 mb-3">
@@ -285,6 +298,7 @@
     <script>
         const nullFilterValue = '__NULL__';
         const availableStockDetailsUrl = @json(route('helper.available_stock_details'));
+        const fifoAllocationUrl = @json(route('helper.fifo_allocation'));
         const detailColumnMap = {
             batch_no: 'BatchNo',
             serial_no: 'SerialNo',
@@ -363,6 +377,11 @@
                         return;
                     }
 
+                    if (this.modalDetail.FifoAuto && this.modalDetail.editIndex === null) {
+                        await this.saveFifoAutoDetail();
+                        return;
+                    }
+
                     if (!isEditMode) {
                         let availableStock = null;
                         try {
@@ -405,6 +424,62 @@
 
                     $('#usage-detail-modal').modal('hide');
                 },
+                async saveFifoAutoDetail() {
+                    const qtyNeeded = Number(this.modalDetail.InputQty || 0);
+                    let response = null;
+
+                    try {
+                        response = await $.ajax({
+                            url: fifoAllocationUrl,
+                            type: 'GET',
+                            data: {
+                                part_id: this.modalDetail.PartID,
+                                warehouse_id: this.modalDetail.WarehouseID,
+                                qty: qtyNeeded,
+                            },
+                        });
+                    } catch (error) {
+                        const message = error && error.responseJSON && error.responseJSON.message
+                            ? error.responseJSON.message
+                            : 'Unable to allocate stock (FIFO). Please try again.';
+                        Swal.fire('Not Enough Stock', message, 'warning');
+                        return;
+                    }
+
+                    const allocations = response && response.data && response.data.allocations ? response.data.allocations : [];
+                    if (!allocations.length) {
+                        Swal.fire('No Stock', 'No batches with stock were found for this part/warehouse.', 'warning');
+                        return;
+                    }
+
+                    allocations.forEach((allocation) => {
+                        const row = JSON.parse(JSON.stringify(this.modalDetail));
+                        row.editIndex = null;
+                        row.FifoAuto = false;
+                        row.BatchNo = allocation.BatchNo;
+                        row.CoilNo = allocation.CoilNo || null;
+                        row.StockQty = allocation.StockQty;
+                        row.StockQty2 = allocation.StockQty2;
+                        row.UnitID2 = allocation.UnitID2;
+                        row.Conversion = 1;
+                        row.InputUnit = row.UnitID;
+                        row.InputQty = allocation.Qty;
+                        row.Qty = allocation.Qty;
+                        // Stock physically lives in the specific (child) warehouse the batch
+                        // was allocated from, which may differ from the parent the user picked.
+                        row.WarehouseID = allocation.WarehouseID || row.WarehouseID;
+                        row.WarehouseName = allocation.WarehouseName || row.WarehouseName;
+                        this.details.push(row);
+                    });
+
+                    $('#usage-detail-modal').modal('hide');
+                },
+                onToggleFifoAuto() {
+                    if (this.modalDetail.FifoAuto) {
+                        this.clearStockAttribute('BatchNo');
+                        this.modalDetail.InputUnit = this.modalDetail.UnitID;
+                    }
+                },
                 clearStockAttribute(field) {
                     const selectors = {
                         BatchNo: '#modal-batch-no',
@@ -444,6 +519,9 @@
                     return formatQty2(calculateQty2(detail), detail.UnitID2);
                 },
                 displayStockQty(detail) {
+                    if (detail && detail.FifoAuto) {
+                        return 'Auto (oldest batch first)';
+                    }
                     const stock = Number(detail && detail.StockQty ? detail.StockQty : 0);
                     if (!stock) return '-';
                     const formatted = Number(stock).toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 6 });
@@ -486,6 +564,7 @@
                 BIN: null,
                 LOC: null,
                 Notes: '',
+                FifoAuto: false,
             };
         }
 
