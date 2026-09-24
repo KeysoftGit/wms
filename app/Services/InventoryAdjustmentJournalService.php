@@ -108,6 +108,8 @@ class InventoryAdjustmentJournalService
                 $db->table('Trans_JournalDT')->insert($chunk);
             }
         }
+
+        JournalValidationService::validateBalanced($transactionNo, 'Inventory Adjustment');
     }
 
     /**

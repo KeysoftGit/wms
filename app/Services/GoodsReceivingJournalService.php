@@ -37,9 +37,7 @@ class GoodsReceivingJournalService
 
         $journalRows = array_merge(
             self::inventoryRows($baseRows),
-            self::unbilledRows($baseRows),
-            self::dutyCreditRows($baseRows, 'RateBeaMasuk', 'RateBeaAccount', 'Rate Bea Masuk'),
-            self::dutyCreditRows($baseRows, 'AntiDumping', 'AntiDumpingAccount', 'Anti Dumping')
+            self::unbilledRows($baseRows)
         );
         $journalRows = array_values(array_filter($journalRows, [self::class, 'hasJournalAmount']));
 
@@ -93,6 +91,10 @@ class GoodsReceivingJournalService
                     $db->table('Material_Cost_Batch_Detail')->insert($chunk);
                 }
             }
+        }
+
+        if (count($journalRows) > 0) {
+            JournalValidationService::validateBalanced($transactionNo, 'Goods Receiving');
         }
     }
 
@@ -422,6 +424,17 @@ class GoodsReceivingJournalService
         }, array_values($groups));
     }
 
+    /**
+     * Credits the full landed cost - goods plus its share of Rate Bea Masuk / Anti Dumping
+     * duty - to the unbilled-received account, mirroring inventoryRows()'s debit side line for
+     * line. At Goods Receiving time the duty is only an estimate folded into the landed cost,
+     * not yet a payable owed to a specific party, so it stays combined here (Rate forced to 1.0,
+     * same as inventoryRows(), since goods and duty convert at different rates - Rate vs
+     * FiscalRate - once merged into a single IDR figure). It only becomes a real liability on
+     * RateBeaAccount / AntiDumpingAccount when the actual duty invoice is booked
+     * (PurchaseInvoiceJournalService::rebuildFreightCost), at which point that invoice's own
+     * amounts - not this GR posting - drive the split.
+     */
     private static function unbilledRows($baseRows): array
     {
         $groups = [];
@@ -429,23 +442,35 @@ class GoodsReceivingJournalService
         foreach ($baseRows as $row) {
             $accountNo = $row->AccountUnbilled;
             $key = implode('|', [$row->TransactionNo, $accountNo, $row->DivisionID]);
-            $amount = self::subtotalOriginal($row);
-            $idr = round($amount * (float) $row->Rate, 6);
+            $goodsIdr = round(self::subtotalOriginal($row) * (float) $row->Rate, 6);
+            $dutyIdr = round(
+                ((float) ($row->RateBeaMasuk ?? 0) + (float) ($row->AntiDumping ?? 0)) * (float) ($row->FiscalRate ?? 0),
+                6
+            );
+            $idr = $goodsIdr + $dutyIdr;
 
-            self::addGroupRow($groups, $key, $row, $accountNo, $amount, $idr);
+            if (!isset($groups[$key])) {
+                $groups[$key] = [
+                    'TransactionNo' => $row->TransactionNo,
+                    'AccountNo' => $accountNo,
+                    'DivisionID' => $row->DivisionID,
+                    'CurrencyID' => $row->CurrencyID,
+                    'Rate' => 1.0,
+                    'PONumber' => $row->PONumber,
+                    'VAT' => $row->VAT,
+                    'created_at' => $row->EntryTime,
+                    'updated_at' => $row->LastUpdate,
+                    'amount' => 0.0,
+                    'idr' => 0.0,
+                ];
+            }
+
+            $groups[$key]['amount'] += $idr;
+            $groups[$key]['idr'] += $idr;
         }
 
         return array_map(static function (array $group): array {
             return self::journalRow($group, 0.0, round($group['idr'], 2));
-        }, array_values($groups));
-    }
-
-    private static function dutyCreditRows($baseRows, string $amountField, string $accountField, string $label): array
-    {
-        $groups = self::dutyGroups($baseRows, $amountField, $accountField, $label);
-
-        return array_map(static function (array $group): array {
-            return self::dutyJournalRow($group, 0.0, round($group['idr'], 2));
         }, array_values($groups));
     }
 
@@ -454,64 +479,6 @@ class GoodsReceivingJournalService
         return abs((float) ($row['Debit'] ?? 0)) > 0.000001
             || abs((float) ($row['Credit'] ?? 0)) > 0.000001
             || abs((float) ($row['OriginalAmount'] ?? 0)) > 0.000001;
-    }
-
-    private static function dutyGroups($baseRows, string $amountField, string $accountField, string $label): array
-    {
-        $groups = [];
-
-        foreach ($baseRows as $row) {
-            $amount = (float) ($row->{$amountField} ?? 0);
-
-            if ($amount == 0.0) {
-                continue;
-            }
-
-            $accountNo = $row->{$accountField};
-            $fiscalRate = (float) ($row->FiscalRate ?? 0);
-            $idr = round($amount * $fiscalRate, 6);
-            $key = implode('|', [$row->TransactionNo, $label, $accountNo, $row->DivisionID]);
-
-            if (!isset($groups[$key])) {
-                $groups[$key] = [
-                    'TransactionNo' => $row->TransactionNo,
-                    'AccountNo' => $accountNo,
-                    'DivisionID' => $row->DivisionID,
-                    'CurrencyID' => $row->CurrencyID,
-                    'Rate' => $fiscalRate,
-                    'PONumber' => $row->PONumber,
-                    'VAT' => $row->VAT,
-                    'Label' => $label,
-                    'created_at' => $row->EntryTime,
-                    'updated_at' => $row->LastUpdate,
-                    'amount' => 0.0,
-                    'idr' => 0.0,
-                ];
-            }
-
-            $groups[$key]['amount'] += $amount;
-            $groups[$key]['idr'] += $idr;
-        }
-
-        return $groups;
-    }
-
-    private static function dutyJournalRow(array $group, float $debit, float $credit): array
-    {
-        return [
-            'TransactionNo' => $group['TransactionNo'],
-            'AccountNo' => $group['AccountNo'],
-            'DivisionID' => $group['DivisionID'],
-            'VoucherNumber' => '',
-            'Debit' => $debit,
-            'Credit' => $credit,
-            'CurrencyID' => $group['CurrencyID'],
-            'Rate' => $group['Rate'],
-            'OriginalAmount' => $group['amount'],
-            'Notes' => $group['Label'] . ' - PO Number = ' . $group['PONumber'] . ' with VAT= ' . $group['VAT'],
-            'created_at' => $group['created_at'],
-            'updated_at' => $group['updated_at'],
-        ];
     }
 
     private static function subtotalOriginal($row): float
@@ -535,28 +502,6 @@ class GoodsReceivingJournalService
     private static function isBlank($value): bool
     {
         return $value === null || trim((string) $value) === '';
-    }
-
-    private static function addGroupRow(array &$groups, string $key, $source, ?string $accountNo, float $amount, float $idr): void
-    {
-        if (!isset($groups[$key])) {
-            $groups[$key] = [
-                'TransactionNo' => $source->TransactionNo,
-                'AccountNo' => $accountNo,
-                'DivisionID' => $source->DivisionID,
-                'CurrencyID' => $source->CurrencyID,
-                'Rate' => (float) $source->Rate,
-                'PONumber' => $source->PONumber,
-                'VAT' => $source->VAT,
-                'created_at' => $source->EntryTime,
-                'updated_at' => $source->LastUpdate,
-                'amount' => 0.0,
-                'idr' => 0.0,
-            ];
-        }
-
-        $groups[$key]['amount'] += $amount;
-        $groups[$key]['idr'] += $idr;
     }
 
     private static function journalRow(array $group, float $debit, float $credit): array

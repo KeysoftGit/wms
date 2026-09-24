@@ -103,6 +103,8 @@ class PartUsageJournalService
                 $db->table('Trans_JournalDT')->insert($chunk);
             }
         }
+
+        JournalValidationService::validateBalanced($transactionNo, 'Part Usage');
     }
 
     /**

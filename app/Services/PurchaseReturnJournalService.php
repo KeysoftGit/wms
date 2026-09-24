@@ -114,6 +114,8 @@ class PurchaseReturnJournalService
                 $db->table('Trans_JournalDT')->insert($chunk);
             }
         }
+
+        JournalValidationService::validateBalanced($transactionNo, 'Purchase Return');
     }
 
     /**
